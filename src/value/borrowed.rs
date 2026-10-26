@@ -419,15 +419,20 @@ impl<'de> BorrowDeserializer<'de> {
     #[cfg_attr(not(feature = "no-inline"), inline)]
     fn parse_map(&mut self, len: usize) -> Value<'de> {
         let mut res = Object::with_capacity_and_hasher(len, ObjectHasher::default());
+        // On a map backend `insert_nocheck` is quadratic in repeated keys
+        #[cfg(not(feature = "value-no-dup-keys"))]
+        let is_map = res.is_map();
 
         // Since we checked if it's empty we know that we at least have one
         // element so we eat this
         for _ in 0..len {
             if let Node::String(key) = unsafe { self.0.next_() } {
                 #[cfg(not(feature = "value-no-dup-keys"))]
-                unsafe {
-                    res.insert_nocheck(key.into(), self.parse());
-                };
+                if is_map {
+                    res.insert(key.into(), self.parse());
+                } else {
+                    unsafe { res.insert_nocheck(key.into(), self.parse()) };
+                }
                 #[cfg(feature = "value-no-dup-keys")]
                 res.insert(key.into(), self.parse());
             } else {
@@ -481,15 +486,20 @@ impl<'tape, 'de> BorrowSliceDeserializer<'tape, 'de> {
     #[cfg_attr(not(feature = "no-inline"), inline)]
     fn parse_map(&mut self, len: usize) -> Value<'de> {
         let mut res = Object::with_capacity_and_hasher(len, ObjectHasher::default());
+        // On a map backend `insert_nocheck` is quadratic in repeated keys
+        #[cfg(not(feature = "value-no-dup-keys"))]
+        let is_map = res.is_map();
 
         // Since we checked if it's empty we know that we at least have one
         // element so we eat this
         for _ in 0..len {
             if let Node::String(key) = unsafe { self.next_() } {
                 #[cfg(not(feature = "value-no-dup-keys"))]
-                unsafe {
-                    res.insert_nocheck(key.into(), self.parse());
-                };
+                if is_map {
+                    res.insert(key.into(), self.parse());
+                } else {
+                    unsafe { res.insert_nocheck(key.into(), self.parse()) };
+                }
                 #[cfg(feature = "value-no-dup-keys")]
                 res.insert(key.into(), self.parse());
             } else {
@@ -533,6 +543,28 @@ mod test {
         assert_eq!(v.pop(), Ok(Some(Value::from(1))));
         assert_eq!(v.pop(), Ok(Some(Value::from(0))));
         assert_eq!(v.pop(), Ok(None));
+    }
+
+    fn repeated_key_object(n: usize) -> Vec<u8> {
+        let members: Vec<String> = (0..n).map(|i| format!(r#""k":{i}"#)).collect();
+        format!("{{{}}}", members.join(",")).into_bytes()
+    }
+
+    #[test]
+    fn repeated_keys_large_object_keep_last() {
+        let mut d = repeated_key_object(33);
+        let v = to_value(&mut d).expect("valid json");
+        assert_eq!(v.as_object().map(Object::len), Some(1));
+        assert_eq!(v["k"], 32);
+    }
+
+    #[test]
+    fn repeated_keys_large_object_keep_last_tape() {
+        let mut d = repeated_key_object(33);
+        let tape = crate::to_tape(&mut d).expect("valid json");
+        let v = BorrowSliceDeserializer::from_tape(&tape.0).parse();
+        assert_eq!(v.as_object().map(Object::len), Some(1));
+        assert_eq!(v["k"], 32);
     }
 
     #[cfg(feature = "128bit")]

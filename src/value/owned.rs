@@ -332,13 +332,18 @@ impl<'de> OwnedDeserializer<'de> {
     #[cfg_attr(not(feature = "no-inline"), inline)]
     fn parse_map(&mut self, len: usize) -> Value {
         let mut res = Object::with_capacity_and_hasher(len, ObjectHasher::default());
+        // On a map backend `insert_nocheck` is quadratic in repeated keys
+        #[cfg(not(feature = "value-no-dup-keys"))]
+        let is_map = res.is_map();
 
         for _ in 0..len {
             if let Node::String(key) = unsafe { self.de.next_() } {
                 #[cfg(not(feature = "value-no-dup-keys"))]
-                unsafe {
-                    res.insert_nocheck(key.into(), self.parse());
-                };
+                if is_map {
+                    res.insert(key.into(), self.parse());
+                } else {
+                    unsafe { res.insert_nocheck(key.into(), self.parse()) };
+                }
                 #[cfg(feature = "value-no-dup-keys")]
                 res.insert(key.into(), self.parse());
             } else {
@@ -381,6 +386,27 @@ mod test {
         assert_eq!(v.pop(), Ok(Some(Value::from(1))));
         assert_eq!(v.pop(), Ok(Some(Value::from(0))));
         assert_eq!(v.pop(), Ok(None));
+    }
+
+    fn repeated_key_object(n: usize) -> Vec<u8> {
+        let members: Vec<String> = (0..n).map(|i| format!(r#""k":{i}"#)).collect();
+        format!("{{{}}}", members.join(",")).into_bytes()
+    }
+
+    #[test]
+    fn repeated_keys_large_object_keep_last() {
+        let mut d = repeated_key_object(33);
+        let v = to_value(&mut d).expect("valid json");
+        assert_eq!(v.as_object().map(Object::len), Some(1));
+        assert_eq!(v["k"], 32);
+    }
+
+    #[test]
+    fn repeated_keys_large_object_keep_last_generic() {
+        let mut d = repeated_key_object(33);
+        let v = crate::value::deserialize::<Value, String>(&mut d).expect("valid json");
+        assert_eq!(v.as_object().map(Object::len), Some(1));
+        assert_eq!(v["k"], 32);
     }
 
     #[cfg(feature = "128bit")]

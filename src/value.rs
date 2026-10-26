@@ -181,15 +181,20 @@ where
     fn parse_map(&mut self, len: usize) -> Value {
         let mut res: HashMap<Key, Value, ObjectHasher> =
             HashMap::with_capacity_and_hasher(len, ObjectHasher::default());
+        // On a map backend `insert_nocheck` is quadratic in repeated keys
+        #[cfg(not(feature = "value-no-dup-keys"))]
+        let is_map = res.is_map();
 
         // Since we checked if it's empty we know that we at least have one
         // element so we eat this
         for _ in 0..len {
             if let Node::String(key) = unsafe { self.de.next_() } {
                 #[cfg(not(feature = "value-no-dup-keys"))]
-                unsafe {
-                    res.insert_nocheck(key.into(), self.parse());
-                };
+                if is_map {
+                    res.insert(key.into(), self.parse());
+                } else {
+                    unsafe { res.insert_nocheck(key.into(), self.parse()) };
+                }
                 #[cfg(feature = "value-no-dup-keys")]
                 res.insert(key.into(), self.parse());
             } else {
